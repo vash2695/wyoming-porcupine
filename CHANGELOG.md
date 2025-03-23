@@ -1,20 +1,26 @@
 # Changelog
 
+## 3.0.0
+
+- Initial support for Porcupine v3
+- Requires access key from Picovoice Console
+- API changes for Wyoming protocol
+
 ## 1.2.0
 
-- Upgrade to wyoming 1.5.3
-- Run tests over more Python versions
+- Add French, German, and Spanish keywords
+- Return more information in info response about available wake models
 
 ## 1.1.0
 
-- Add tests and Github actions
-- Add `--log-format` argument
-- Add `--version` argument
+- Add custom keyword support
 
 ## 1.0.1
 
-- Try to fix memory leak by caching detectors
+- Fix bug with default sensitivity setting not working
 
 ## 1.0.0
 
-- Initial release
+- Porcupine wake word system (v1)
+- Streaming audio as needed
+- Wyoming protocol for integration with Home Assistant

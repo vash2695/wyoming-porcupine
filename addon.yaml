@@ -1,0 +1,39 @@
+name: Porcupine Wake Word (v3)
+description: >-
+  Wake word detection for Home Assistant using the Wyoming protocol and Porcupine v3
+version: 3.0.0
+slug: porcupine3
+arch:
+  - amd64
+  - aarch64
+  - armv7
+  - armhf
+startup: application
+services:
+  - mqtt:need
+options:
+  uri: tcp://0.0.0.0:10400
+  access_key: ""
+  sensitivity: 0.5
+  language: en
+schema:
+  uri: str
+  access_key: str
+  sensitivity: float(0,1)
+  language: list(en|es|fr|de)
+init: false
+discovery:
+  service:
+    name: wyoming_{slug}_{instance}
+    host: "{host}"
+    port: "10400"
+    type: _wyoming._tcp.local.
+    properties:
+      type: wake
+ports:
+  "10400/tcp": 10400
+  "10400/udp": 10400
+ports_description:
+  "10400/tcp": Wyoming protocol
+  "10400/udp": Wyoming protocol
+image: rhasspy/wyoming-porcupine3-{arch} 

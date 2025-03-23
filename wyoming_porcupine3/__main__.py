@@ -5,7 +5,6 @@ import logging
 import platform
 import struct
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -20,7 +19,7 @@ from wyoming.wake import Detect, Detection, NotDetected
 
 from . import __version__
 
-_LOGGER = logging.getLogger()
+_LOGGER = logging.getLogger(__name__)
 _DIR = Path(__file__).parent
 
 DEFAULT_KEYWORD = "porcupine"
@@ -32,7 +31,6 @@ class Keyword:
 
     language: str
     name: str
-    model_path: Path
 
 
 @dataclass
@@ -44,12 +42,12 @@ class Detector:
 class State:
     """State of system"""
 
-    def __init__(self, pv_lib_paths: Dict[str, Path], keywords: Dict[str, Keyword]):
-        self.pv_lib_paths = pv_lib_paths
+    def __init__(self, access_key: str, keywords: Dict[str, Keyword]):
+        self.access_key = access_key
         self.keywords = keywords
 
         # keyword name -> [detector]
-        self.detector_cache: Dict[str, List[Detector]] = defaultdict(list)
+        self.detector_cache: Dict[str, List[Detector]] = {}
         self.detector_lock = asyncio.Lock()
 
     async def get_porcupine(self, keyword_name: str, sensitivity: float) -> Detector:
@@ -59,26 +57,27 @@ class State:
 
         # Check cache first for matching detector
         async with self.detector_lock:
-            detectors = self.detector_cache.get(keyword_name)
-            if detectors:
-                detector = next(
-                    (d for d in detectors if d.sensitivity == sensitivity), None
-                )
-                if detector is not None:
-                    # Remove from cache for use
-                    detectors.remove(detector)
+            detectors = self.detector_cache.get(keyword_name, [])
+            detector = next(
+                (d for d in detectors if d.sensitivity == sensitivity), None
+            )
+            if detector is not None:
+                # Remove from cache for use
+                detectors.remove(detector)
 
-                    _LOGGER.debug(
-                        "Using detector for %s from cache (%s)",
-                        keyword_name,
-                        len(detectors),
-                    )
-                    return detector
+                _LOGGER.debug(
+                    "Using detector for %s from cache (%s)",
+                    keyword_name,
+                    len(detectors),
+                )
+                return detector
 
         _LOGGER.debug("Loading %s for %s", keyword.name, keyword.language)
+        
+        # Create the Porcupine detector with v3 API
         porcupine = pvporcupine.create(
-            model_path=str(self.pv_lib_paths[keyword.language]),
-            keyword_paths=[str(keyword.model_path)],
+            access_key=self.access_key,
+            keywords=[keyword_name],
             sensitivities=[sensitivity],
         )
 
@@ -90,11 +89,16 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uri", default="stdio://", help="unix:// or tcp://")
     parser.add_argument(
-        "--data-dir", default=_DIR / "data", help="Path to directory lib/resources"
+        "--access-key", 
+        required=True, 
+        help="Access key from Picovoice console"
     )
-    parser.add_argument("--system", help="linux or raspberry-pi")
     parser.add_argument("--sensitivity", type=float, default=0.5)
-    #
+    parser.add_argument(
+        "--language", 
+        default="en", 
+        help="Language for wake words (en, fr, es, de)"
+    )
     parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
     parser.add_argument(
         "--log-format", default=logging.BASIC_FORMAT, help="Format for log messages"
@@ -111,36 +115,31 @@ async def main() -> None:
     )
     _LOGGER.debug(args)
 
-    if not args.system:
-        machine = platform.machine().lower()
-        if ("arm" in machine) or ("aarch" in machine):
-            args.system = "raspberry-pi"
-        else:
-            args.system = "linux"
-
-    args.data_dir = Path(args.data_dir)
-
-    # lang -> path
-    pv_lib_paths: Dict[str, Path] = {}
-    for lib_path in (args.data_dir / "lib" / "common").glob("*.pv"):
-        lib_lang = lib_path.stem.split("_")[-1]
-        pv_lib_paths[lib_lang] = lib_path
-
-    # name -> keyword
-    keywords: Dict[str, Keyword] = {}
-    for kw_path in (args.data_dir / "resources").rglob("*.ppn"):
-        kw_system = kw_path.stem.split("_")[-1]
-        if kw_system != args.system:
-            continue
-
-        kw_lang = kw_path.parent.parent.name
-        kw_name = kw_path.stem.rsplit("_", maxsplit=1)[0]
-        keywords[kw_name] = Keyword(language=kw_lang, name=kw_name, model_path=kw_path)
+    # For v3, we need to get a list of available keywords for the specified language
+    try:
+        available_keywords = pvporcupine.KEYWORDS
+        # Filter keywords for the requested language
+        language_keywords = [kw for kw in available_keywords if kw.startswith(args.language)]
+        
+        # Create the keywords dictionary
+        keywords: Dict[str, Keyword] = {}
+        for kw in language_keywords:
+            kw_name = kw.split("_")[0] if "_" in kw else kw
+            keywords[kw_name] = Keyword(language=args.language, name=kw_name)
+            
+        if not keywords:
+            _LOGGER.warning(f"No keywords found for language {args.language}")
+            _LOGGER.info(f"Available keywords: {', '.join(available_keywords)}")
+    except Exception as e:
+        _LOGGER.error(f"Error loading available keywords: {e}")
+        keywords = {}
+        # Add default keyword as fallback
+        keywords[DEFAULT_KEYWORD] = Keyword(language="en", name=DEFAULT_KEYWORD)
 
     wyoming_info = Info(
         wake=[
             WakeProgram(
-                name="porcupine1",
+                name="porcupine3",
                 description="On-device wake word detection powered by deep learning",
                 attribution=Attribution(
                     name="Picovoice", url="https://github.com/Picovoice/porcupine"
@@ -158,7 +157,7 @@ async def main() -> None:
                         ),
                         installed=True,
                         languages=[kw.language],
-                        version="1.9.0",
+                        version="3.0.0",
                     )
                     for kw in keywords.values()
                 ],
@@ -166,7 +165,7 @@ async def main() -> None:
         ],
     )
 
-    state = State(pv_lib_paths=pv_lib_paths, keywords=keywords)
+    state = State(access_key=args.access_key, keywords=keywords)
 
     _LOGGER.info("Ready")
 
@@ -174,7 +173,7 @@ async def main() -> None:
     server = AsyncServer.from_uri(args.uri)
 
     try:
-        await server.run(partial(Porcupine1EventHandler, wyoming_info, args, state))
+        await server.run(partial(Porcupine3EventHandler, wyoming_info, args, state))
     except KeyboardInterrupt:
         pass
 
@@ -182,7 +181,7 @@ async def main() -> None:
 # -----------------------------------------------------------------------------
 
 
-class Porcupine1EventHandler(AsyncEventHandler):
+class Porcupine3EventHandler(AsyncEventHandler):
     """Event handler for clients."""
 
     def __init__(
@@ -248,57 +247,40 @@ class Porcupine1EventHandler(AsyncEventHandler):
                             name=self.keyword_name, timestamp=chunk.timestamp
                         ).event()
                     )
+                    self.detected = True
+                    if AudioStop.is_type(event.type):
+                        return True
 
                 self.audio_buffer = self.audio_buffer[self.bytes_per_chunk :]
 
         elif AudioStop.is_type(event.type):
-            # Inform client if not detections occurred
             if not self.detected:
-                # No wake word detections
+                # Report no detection
                 await self.write_event(NotDetected().event())
-
-                _LOGGER.debug(
-                    "Audio stopped without detection from client: %s", self.client_id
-                )
-
-            return False
-        else:
-            _LOGGER.debug("Unexpected event: type=%s, data=%s", event.type, event.data)
 
         return True
 
-    async def disconnect(self) -> None:
-        _LOGGER.debug("Client disconnected: %s", self.client_id)
-
+    async def _load_keyword(self, keyword_name: str) -> None:
+        """Load a specific wake word model."""
         if self.detector is not None:
-            # Return detector to cache
+            # Cache existing detector
             async with self.state.detector_lock:
-                self.state.detector_cache[self.keyword_name].append(self.detector)
-                self.detector = None
-                _LOGGER.debug(
-                    "Detector for %s returned to cache (%s)",
-                    self.keyword_name,
-                    len(self.state.detector_cache[self.keyword_name]),
-                )
+                detectors = self.state.detector_cache.setdefault(self.keyword_name, [])
+                detectors.append(self.detector)
 
-    async def _load_keyword(self, keyword_name: str):
+            self.detector = None
+            self.keyword_name = ""
+            self.chunk_format = ""
+            self.bytes_per_chunk = 0
+
         self.detector = await self.state.get_porcupine(
             keyword_name, self.cli_args.sensitivity
         )
         self.keyword_name = keyword_name
-        self.chunk_format = "h" * self.detector.porcupine.frame_length
-        self.bytes_per_chunk = self.detector.porcupine.frame_length * 2
+        self.chunk_format = f"{self.detector.porcupine.frame_length}h"
+        self.bytes_per_chunk = self.detector.porcupine.frame_length * 2  # 16-bit
 
 
-# -----------------------------------------------------------------------------
-
-
-def run() -> None:
-    asyncio.run(main())
-
-
-if __name__ == "__main__":
-    try:
-        run()
-    except KeyboardInterrupt:
-        pass
+def run():
+    """Run from command-line."""
+    asyncio.run(main()) 
